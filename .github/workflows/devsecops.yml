@@ -1,0 +1,74 @@
+name: DevSecOps Pipeline
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  # Tahap 1: Gitleaks - deteksi kebocoran secret
+  gitleaks:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Tahap 2: Semgrep - SAST
+  semgrep:
+    needs: gitleaks
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep Scan
+        run: |
+          docker run --rm -v "$PWD:/src" returntocorp/semgrep semgrep --config=auto --error
+
+  # Tahap 3: Trivy scan file (Dockerfile misconfig)
+  trivy-file:
+    needs: semgrep
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy Config Scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+  # Tahap 4: Docker build
+  build:
+    needs: trivy-file
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        run: docker build -t webapp:${{ github.sha }} .
+
+  # Tahap 5: Trivy scan image
+  trivy-image:
+    needs: build
+    runs-on: self-hosted
+    steps:
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: 'webapp:${{ github.sha }}'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+  # Tahap 6: Deploy
+  deploy:
+    needs: trivy-image
+    runs-on: self-hosted
+    steps:
+      - name: Deploy
+        run: |
+          docker stop webapp || true
+          docker rm webapp || true
+          docker run -d --name webapp -p 8081:80 webapp:${{ github.sha }}
